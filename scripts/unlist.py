@@ -134,10 +134,10 @@ def cmd_queries(_args) -> None:
             loc = f' "{city}"' if city else ""
             print(f'"{name}"{loc}')
             print(f'"{name}"{loc} (spokeo OR whitepages OR beenverified OR radaris OR mylife)')
-        for phone in p.get("phones") or []:
-            print(f'"{phone}"')
-        for email in p.get("emails") or []:
-            print(f'"{email}"')
+    for phone in p.get("phones") or []:
+        print(f'"{phone}"')
+    for email in p.get("emails") or []:
+        print(f'"{email}"')
     print("\n# Site-restricted")
     for b in brokers:
         host = (b.get("search_url") or "").replace("https://", "").replace("http://", "").split("/")[0]
@@ -276,6 +276,7 @@ def cmd_status(_args) -> None:
     counts: dict[str, int] = {}
     follow = []
     recheck = []
+    today = date.today().isoformat()
     for bid, rec in state["requests"].items():
         st = rec.get("status", "pending")
         counts[st] = counts.get(st, 0) + 1
@@ -283,9 +284,13 @@ def cmd_status(_args) -> None:
             follow.append((rec["follow_up_on"], bid, rec))
         if rec.get("recheck_on") and st == "completed":
             recheck.append((rec["recheck_on"], bid, rec))
+        if st == "reappeared":
+            recheck.append((today, bid, rec))
+    unlogged = sum(1 for bid in brokers if bid not in state["requests"])
+    if unlogged:
+        counts["pending"] = counts.get("pending", 0) + unlogged
     print("Counts:", json.dumps(counts or {"pending": len(brokers)}, indent=2))
     print(f"Custom URLs logged: {len(state.get('custom') or [])}")
-    today = date.today().isoformat()
     due_f = [x for x in follow if x[0] <= today]
     due_r = [x for x in recheck if x[0] <= today]
     if due_f:
@@ -309,7 +314,7 @@ def in_scope(broker: dict, profile: dict) -> bool:
 def cmd_next(_args) -> None:
     state = load_state()
     profile = load_profile()
-    open_status = {"pending", "found"}
+    open_status = {"pending", "found", "reappeared"}
     ranked = sorted(load_brokers(), key=lambda b: (-b.get("priority", 0), b.get("wave", 9)))
     for b in ranked:
         if not in_scope(b, profile):
