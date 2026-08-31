@@ -1,0 +1,19 @@
+{
+  "legal_name": "Jane Q Doe",
+  "aliases": ["Jane Doe", "J Q Doe"],
+  "date_of_birth": "1984-06-12",
+  "emails": ["jane@example.com"],
+  "phones": ["+1-615-555-0100"],
+  "addresses": [
+    {
+      "line1": "123 Main St",
+      "city": "Nashville",
+      "state": "TN",
+      "postal_code": "37203",
+      "current": true
+    }
+  ],
+  "state_of_residence": "TN",
+  "california_resident": false,
+  "notes": "Copy this file to profile.json. Never commit profile.json."
+}
