@@ -1,0 +1,8 @@
+profile.json
+data/state.json
+logs/*.jsonl
+logs/*.md
+__pycache__/
+*.pyc
+.DS_Store
+.env
