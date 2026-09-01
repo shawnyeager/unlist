@@ -10,13 +10,7 @@ Please treat this as a request to:
 - Opt out of sale / share / targeted advertising
 - Add my identifiers to your suppression file so the record is not rebuilt from public or licensed sources
 
-Identity
-- Full name: {{legal_name}}
-- Other names: {{aliases}}
-- Email(s): {{emails}}
-- Phone(s): {{phones}}
-- Address(es): {{addresses}}
-{{dob_line}}
+{{identity_block}}
 
 If you maintain a listing URL for me, one known URL is: {{listing_url}}
 

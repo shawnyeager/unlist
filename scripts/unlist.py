@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Unlist — local data-broker removal agent.
+"""Unlist — local data-broker removal playbook and CLI.
 
 No network calls. Generates scan queries, work queues, and request letters
-from profile.json + data/brokers.json. You (or a Grok Bot) execute the
-forms and emails. State stays on disk.
+from profile.json + data/brokers.json. A Grok Bot submits the forms.
+State stays on disk.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ import json
 import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
 DATA = ROOT / "data"
@@ -21,8 +22,19 @@ EXAMPLE_PATH = ROOT / "profile.example.json"
 BROKERS_PATH = DATA / "brokers.json"
 STATE_PATH = DATA / "state.json"
 LETTER_TMPL = ROOT / "templates" / "deletion-request.md"
+FOLLOW_TMPL = ROOT / "templates" / "follow-up.md"
 AUTH_TMPL = ROOT / "templates" / "authorization.md"
 LOG_PATH = ROOT / "logs" / "actions.jsonl"
+STATUSES = [
+    "pending",
+    "found",
+    "sent",
+    "waiting_verify",
+    "completed",
+    "failed",
+    "skipped",
+    "reappeared",
+]
 
 
 def load_json(path: Path):
@@ -39,7 +51,7 @@ def save_json(path: Path, obj) -> None:
 def load_profile() -> dict:
     data = load_json(PROFILE_PATH)
     if not data:
-        sys.exit(f"Missing {PROFILE_PATH}. Run: python scripts/unlist.py init")
+        sys.exit(f"Missing {PROFILE_PATH}. Run: python3 scripts/unlist.py init")
     return data
 
 
@@ -63,7 +75,7 @@ def broker_by_id(brokers: list[dict], ident: str) -> dict:
     for b in brokers:
         if b["id"] == ident or b["name"].lower() == ident:
             return b
-    sys.exit(f"Unknown broker: {ident}. Try: python scripts/unlist.py queue")
+    sys.exit(f"Unknown broker: {ident}. Try: python3 scripts/unlist.py queue")
 
 
 def fmt_addresses(profile: dict) -> str:
@@ -91,23 +103,34 @@ def law_line(profile: dict) -> str:
         "TN": "Tennessee TIPA",
         "DE": "Delaware PDPA",
         "NJ": "New Jersey NJSDA",
-        "NH": "New Hampshire",
+        "NH": "the New Hampshire Privacy Act",
         "IA": "Iowa ICDPA",
-        "IN": "Indiana",
-        "KY": "Kentucky",
-        "MD": "Maryland",
-        "MN": "Minnesota",
-        "NE": "Nebraska",
+        "IN": "Indiana ICDPA",
+        "KY": "Kentucky KCDPA",
+        "MD": "Maryland MODPA",
+        "MN": "Minnesota MCDPA",
+        "NE": "Nebraska NDPA",
     }
     if state in rights:
         return f"I reside in {state}. Process this under {rights[state]} and any other law that applies."
     return "Process this under any U.S. state privacy law that applies to you, and honor the request even if you believe no statute compels it."
 
 
+def in_scope(broker: dict, profile: dict) -> bool:
+    if broker.get("id") == "ca-drop":
+        return bool(profile.get("california_resident") or (profile.get("state_of_residence") or "").upper() == "CA")
+    return True
+
+
+def require_in_scope(broker: dict, profile: dict) -> None:
+    if not in_scope(broker, profile):
+        sys.exit(f"{broker['id']} is out of scope for this profile.")
+
+
 def fill_template(text: str, mapping: dict) -> str:
     out = text
     for k, v in mapping.items():
-        out = out.replace("{{ " + k + "}}", v) if False else out.replace("{{" + k + "}}", v)
+        out = out.replace("{{" + k + "}}", str(v))
     return out
 
 
@@ -120,7 +143,7 @@ def cmd_init(_args) -> None:
     state = load_state()
     save_state(state)
     LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    print("Next: edit profile.json, then run `python scripts/unlist.py queries` and `queue`.")
+    print("Next: edit profile.json, then run `python3 scripts/unlist.py queries` and `queue`.")
 
 
 def cmd_queries(_args) -> None:
@@ -134,10 +157,10 @@ def cmd_queries(_args) -> None:
             loc = f' "{city}"' if city else ""
             print(f'"{name}"{loc}')
             print(f'"{name}"{loc} (spokeo OR whitepages OR beenverified OR radaris OR mylife)')
-        for phone in p.get("phones") or []:
-            print(f'"{phone}"')
-        for email in p.get("emails") or []:
-            print(f'"{email}"')
+    for phone in p.get("phones") or []:
+        print(f'"{phone}"')
+    for email in p.get("emails") or []:
+        print(f'"{email}"')
     print("\n# Site-restricted")
     for b in brokers:
         host = (b.get("search_url") or "").replace("https://", "").replace("http://", "").split("/")[0]
@@ -148,10 +171,13 @@ def cmd_queries(_args) -> None:
 
 def cmd_queue(args) -> None:
     brokers = load_brokers()
+    profile = load_profile()
     state = load_state()
     wave = args.wave
     rows = []
     for b in brokers:
+        if not in_scope(b, profile):
+            continue
         if wave is not None and b.get("wave") != wave:
             continue
         rec = state["requests"].get(b["id"], {})
@@ -166,18 +192,40 @@ def cmd_queue(args) -> None:
         url = b.get("opt_out_url") or b.get("email") or ""
         extra = f"  last={rec['updated'][:10]}" if rec.get("updated") else ""
         print(f"{b['id']:<22} {b.get('wave', '-'):<5} {b.get('priority', 0):<4} {status:<16} {url}{extra}")
-    print(f"\n{len(rows)} brokers. Use: python scripts/unlist.py show ID | letter ID | next")
+    print(f"\n{len(rows)} brokers. Use: python3 scripts/unlist.py show ID | letter ID | followup ID | next")
 
 
 def cmd_show(args) -> None:
     b = broker_by_id(load_brokers(), args.broker)
+    require_in_scope(b, load_profile())
     rec = load_state()["requests"].get(b["id"], {})
     print(json.dumps({**b, "record": rec}, indent=2))
+
+
+def identity_block(profile: dict, *, minimal: bool) -> str:
+    lines = [
+        "Identity",
+        f"- Full name: {profile['legal_name']}",
+    ]
+    if not minimal:
+        aliases = ", ".join(profile.get("aliases") or []) or "(none)"
+        lines.append(f"- Other names: {aliases}")
+    emails = ", ".join(profile.get("emails") or []) or "(none)"
+    lines.append(f"- Email(s): {emails}")
+    if not minimal:
+        phones = ", ".join(profile.get("phones") or []) or "(none)"
+        lines.append(f"- Phone(s): {phones}")
+        lines.append(f"- Address(es): {fmt_addresses(profile)}")
+        dob = profile.get("date_of_birth")
+        if dob:
+            lines.append(f"- Date of birth: {dob}")
+    return "\n".join(lines)
 
 
 def mapping_for(profile: dict, broker: dict | None, listing_url: str = "") -> dict:
     aliases = ", ".join(profile.get("aliases") or []) or "(none)"
     dob = profile.get("date_of_birth")
+    minimal = bool(broker and broker.get("needs_listing_url"))
     return {
         "legal_name": profile["legal_name"],
         "aliases": aliases,
@@ -185,6 +233,7 @@ def mapping_for(profile: dict, broker: dict | None, listing_url: str = "") -> di
         "phones": ", ".join(profile.get("phones") or []) or "(none)",
         "addresses": fmt_addresses(profile),
         "dob_line": f"- Date of birth: {dob}" if dob else "",
+        "identity_block": identity_block(profile, minimal=minimal),
         "broker_name": broker["name"] if broker else "the site at the URL below",
         "listing_url": listing_url or "(not yet found — search your name and attach the profile URL if you have it)",
         "law_line": law_line(profile),
@@ -196,7 +245,10 @@ def mapping_for(profile: dict, broker: dict | None, listing_url: str = "") -> di
 def cmd_letter(args) -> None:
     profile = load_profile()
     broker = broker_by_id(load_brokers(), args.broker)
-    text = fill_template(LETTER_TMPL.read_text(), mapping_for(profile, broker, args.url or ""))
+    require_in_scope(broker, profile)
+    rec = load_state()["requests"].get(broker["id"], {})
+    listing = args.url or rec.get("listing_url") or ""
+    text = fill_template(LETTER_TMPL.read_text(), mapping_for(profile, broker, listing))
     print(text)
     if broker.get("opt_out_url"):
         print(f"\n---\nOpt-out URL: {broker['opt_out_url']}")
@@ -208,6 +260,24 @@ def cmd_letter(args) -> None:
             print(f"  {i}. {s}")
 
 
+def cmd_followup(args) -> None:
+    profile = load_profile()
+    broker = broker_by_id(load_brokers(), args.broker)
+    require_in_scope(broker, profile)
+    rec = load_state()["requests"].get(broker["id"], {})
+    listing = args.url or rec.get("listing_url") or ""
+    sent = rec.get("sent_at") or rec.get("updated") or ""
+    mapping = mapping_for(profile, broker, listing)
+    mapping["sent_date"] = sent[:10] if sent else "(unknown)"
+    if not listing:
+        mapping["listing_url"] = "(none logged)"
+    print(fill_template(FOLLOW_TMPL.read_text(), mapping))
+    if broker.get("opt_out_url"):
+        print(f"\n---\nOpt-out URL: {broker['opt_out_url']}")
+    if broker.get("email"):
+        print(f"Email: {broker['email']}")
+
+
 def cmd_auth(_args) -> None:
     profile = load_profile()
     print(fill_template(AUTH_TMPL.read_text(), mapping_for(profile, None)))
@@ -215,14 +285,16 @@ def cmd_auth(_args) -> None:
 
 def cmd_custom(args) -> None:
     profile = load_profile()
-    fake = {"name": args.url}
+    raw = args.url if "://" in args.url else f"https://{args.url}"
+    host = urlparse(raw).hostname or args.url
+    fake = {"name": host, "needs_listing_url": True}
     print(fill_template(LETTER_TMPL.read_text(), mapping_for(profile, fake, args.url)))
     print("\n---\nAgent notes")
     print("1. Open the URL. Confirm it is actually this person.")
     print("2. Find Privacy / Do Not Sell / CCPA / Remove my info.")
     print("3. If a form exists, use the form and keep this letter as backup.")
     print("4. If only an email exists, send this letter.")
-    print("5. Log it: python scripts/unlist.py log-custom URL sent")
+    print("5. Log it: python3 scripts/unlist.py log-custom URL sent")
 
 
 def append_log(event: dict) -> None:
@@ -291,19 +363,13 @@ def cmd_status(_args) -> None:
     if due_f:
         print("\nFollow-ups due:")
         for when, bid, rec in sorted(due_f):
-            print(f"  {when}  {bid}  {brokers.get(bid, {}).get('opt_out_url', '')}")
+            print(f"  {when}  {bid}  python3 scripts/unlist.py followup {bid}")
     if due_r:
         print("\nRechecks due (likely re-listed):")
         for when, bid, rec in sorted(due_r):
             print(f"  {when}  {bid}")
     if not due_f and not due_r:
         print("\nNo follow-ups or rechecks due today.")
-
-
-def in_scope(broker: dict, profile: dict) -> bool:
-    if broker.get("id") == "ca-drop":
-        return bool(profile.get("california_resident") or (profile.get("state_of_residence") or "").upper() == "CA")
-    return True
 
 
 def cmd_next(_args) -> None:
@@ -321,14 +387,15 @@ def cmd_next(_args) -> None:
             if b.get("steps"):
                 for i, s in enumerate(b["steps"], 1):
                     print(f"  {i}. {s}")
-            print(f"\nLetter:\n  python scripts/unlist.py letter {b['id']}")
-            print(f"After you submit:\n  python scripts/unlist.py log {b['id']} sent")
+            print(f"\nOpen the opt-out URL and submit the form.")
+            print(f"Letter only if there is no form:\n  python3 scripts/unlist.py letter {b['id']}")
+            print(f"After submit:\n  python3 scripts/unlist.py log {b['id']} sent")
             return
     print("Queue clear. Run status for follow-ups, or log a custom URL.")
 
 
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(prog="unlist", description="Local data-broker removal agent")
+    p = argparse.ArgumentParser(prog="unlist", description="Local data-broker removal playbook and CLI")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("init").set_defaults(func=cmd_init)
     sub.add_parser("queries").set_defaults(func=cmd_queries)
@@ -349,18 +416,19 @@ def build_parser() -> argparse.ArgumentParser:
     c.set_defaults(func=cmd_custom)
     lg = sub.add_parser("log")
     lg.add_argument("broker")
-    lg.add_argument(
-        "status",
-        choices=["pending", "found", "sent", "waiting_verify", "completed", "failed", "skipped", "reappeared"],
-    )
+    lg.add_argument("status", choices=STATUSES)
     lg.add_argument("--note")
     lg.add_argument("--url")
     lg.set_defaults(func=cmd_log)
     lc = sub.add_parser("log-custom")
     lc.add_argument("url")
-    lc.add_argument("status")
+    lc.add_argument("status", choices=STATUSES)
     lc.add_argument("--note")
     lc.set_defaults(func=cmd_log_custom)
+    fu = sub.add_parser("followup")
+    fu.add_argument("broker")
+    fu.add_argument("--url", default="")
+    fu.set_defaults(func=cmd_followup)
     sub.add_parser("status").set_defaults(func=cmd_status)
     sub.add_parser("next").set_defaults(func=cmd_next)
     return p
